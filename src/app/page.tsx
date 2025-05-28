@@ -14,7 +14,42 @@ export default function Home() {
   const [currentPage, setCurrentPage] = useState(1);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [postToDelete, setPostToDelete] = useState<string | null>(null);
+  const [timer, setTimer] = useState(60); // 60 seconds timer
+  const [isTimerRunning, setIsTimerRunning] = useState(false);
   const postsPerPage = 3;
+
+  // Timer effect
+  useEffect(() => {
+    let timerInterval: NodeJS.Timeout;
+    
+    if (isTimerRunning) {
+      timerInterval = setInterval(() => {
+        setTimer((prevTimer) => {
+          if (prevTimer <= 1) {
+            // Generate new content when timer reaches 0
+            if (currentTopic) {
+              generateAndStorePost();
+            }
+            return 60; // Reset timer
+          }
+          return prevTimer - 1;
+        });
+      }, 1000);
+    }
+
+    return () => {
+      if (timerInterval) {
+        clearInterval(timerInterval);
+      }
+    };
+  }, [isTimerRunning, currentTopic]);
+
+  // Format timer display
+  const formatTimer = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   // Fetch all posts from Firebase
   const fetchPosts = async () => {
@@ -186,6 +221,13 @@ export default function Home() {
     }
   };
 
+  // Stop timer function
+  const stopTimer = () => {
+    setIsTimerRunning(false);
+    setTimer(60); // Reset timer to initial value
+  };
+
+  // Modify handleGenerate to start timer
   const handleGenerate = async () => {
     if (!currentTopic) {
       setError("Please enter a topic");
@@ -201,6 +243,7 @@ export default function Home() {
 
       setIsLoading(true);
       setError(null);
+      setIsTimerRunning(true); // Start the timer
 
       const response = await fetch("/api/generate", {
         method: "POST",
@@ -299,6 +342,26 @@ export default function Home() {
       </header>
 
       <div className="p-6 flex flex-col items-center gap-4">
+        {/* Timer Display with Stop Button */}
+        <div className="text-center mb-8 flex items-center gap-4">
+          {isTimerRunning && (
+            <button
+              onClick={stopTimer}
+              className="px-4 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-colors"
+            >
+              Stop
+            </button>
+          )}
+          <div>
+            <div className="text-4xl font-bold text-gray-800 mb-4">
+              {formatTimer(timer)}
+            </div>
+            <div className="text-gray-600">
+              {isTimerRunning ? `Next generation in ${timer} seconds` : "Timer stopped"}
+            </div>
+          </div>
+        </div>
+
         <div className="w-full max-w-md relative">
           <input
             type="text"
