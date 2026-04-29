@@ -1,113 +1,124 @@
 import { NextResponse } from "next/server";
 import { Article } from "@/app/types/article";
+import OpenAI from "openai";
 
 const OPENROUTER_API_KEY = process.env.Deep_Seek_API_KEY;
 const SITE_URL = "http://localhost:3000";
 const SITE_NAME = "AI Content Generator";
 
-// Generate unique content using OpenRouter
-const generateAIContent = async (topic: string, previousTitles: string[] = []) => {
-  try {
-    if (!OPENROUTER_API_KEY) {
-      throw new Error("OpenRouter API key is not configured");
-    }
+// Working free models on OpenRouter (updated 2026)
+// Check https://openrouter.ai/models?max_price=0 for latest
+const MODELS = [
+  "tencent/hy3-preview:free",        // Tencent Hunyuan 3 Preview
+  "nvidia/nemotron-3-super-120b-a12b:free",  // Nvidia Nemotron Super 120B
+  "openai/gpt-oss-120b:free",         // OpenAI GPT-OSS 120B
+  "minimax/minimax-m2.5:free",        // MiniMax M2.5
+  "z-ai/glm-4.5-air:free",            // Z-AI GLM 4.5 Air
+  "nvidia/nemotron-3-nano-30b-a3b:free", // Nvidia Nemotron Nano 30B
+  "openai/gpt-oss-20b:free",          // OpenAI GPT-OSS 20B
+];
 
-    console.log("Starting API request for topic:", topic);
-    console.log("Using API key:", OPENROUTER_API_KEY.substring(0, 10) + "...");
-    
-    const requestBody = {
-      model: "deepseek/deepseek-r1:free",
+// Create OpenAI client configured for OpenRouter
+const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: OPENROUTER_API_KEY || "",
+  defaultHeaders: {
+    "HTTP-Referer": SITE_URL,
+    "X-Title": SITE_NAME,
+  },
+});
+
+// Sleep utility for retry delays
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Track last API call time for cooldown
+let lastApiCallTime = 0;
+const COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes cooldown
+
+// Generate content with retry logic and model fallback
+const generateAIContent = async (topic: string, attempt = 0, modelIndex = 0): Promise<{ title: string; description: string; modelUsed: string }> => {
+  if (!OPENROUTER_API_KEY) {
+    throw new Error("OpenRouter API key is not configured");
+  }
+
+  // Check cooldown
+  const now = Date.now();
+  const timeSinceLastCall = now - lastApiCallTime;
+  if (timeSinceLastCall < COOLDOWN_MS) {
+    const remainingSeconds = Math.ceil((COOLDOWN_MS - timeSinceLastCall) / 1000);
+    throw new Error(`Please wait ${remainingSeconds} seconds before generating again.`);
+  }
+
+  if (modelIndex >= MODELS.length) {
+    throw new Error("All models are currently rate limited. Please try again in a few minutes.");
+  }
+
+  const model = MODELS[modelIndex];
+  console.log(`Attempt ${attempt + 1} using model: ${model}`);
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: model,
       messages: [
         {
           role: "system",
-          content: "You are an engaging writer. Respond with exactly two parts:\n1. Title: Create a compelling title in 1-2 lines (10-15 words max)\n2. Description: Write a detailed description in 6-7 complete sentences (no truncation). Make each sentence informative and engaging."
+          content: "You are a content writer. Create a title and description for the given topic. Respond in this exact format:\nTitle: [your title here]\nDescription: [your description here]",
         },
         {
           role: "user",
-          content: `Write an article about "${topic}" in the following format:
-Title: [Your title here]
-Description: [Your detailed description here]`
-        }
+          content: `Write about "${topic}"`,
+        },
       ],
-      max_tokens: 500,
+      max_tokens: 300,
       temperature: 0.7,
-      top_p: 0.9
-    };
-
-    console.log("Request body:", JSON.stringify(requestBody, null, 2));
-
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "HTTP-Referer": SITE_URL,
-        "X-Title": SITE_NAME,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(requestBody)
     });
 
-    console.log("API Response Status:", response.status);
-    
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      console.error("API Error Response:", errorData);
-      throw new Error(errorData.error?.message || `API error: ${response.status}`);
-    }
+    const content = response.choices?.[0]?.message?.content;
 
-    const responseData = await response.json();
-    console.log("API Response Data:", JSON.stringify(responseData, null, 2));
-
-    const content = responseData.choices?.[0]?.message?.content;
     if (!content) {
-      console.error("No content in response:", responseData);
       throw new Error("No content received from API");
     }
 
-    console.log("Raw content received:", content);
-
-    // First try to extract using the expected format
+    // Extract title and description
     const titleMatch = content.match(/Title:\s*(.+?)(?:\n|$)/i);
     const descriptionMatch = content.match(/Description:\s*(.+?)(?:\n|$)/i);
 
-    let title, description;
-
-    if (titleMatch && descriptionMatch) {
-      title = titleMatch[1].trim();
-      description = descriptionMatch[1].trim();
-    } else {
-      // Fallback: try to split by newlines and take first two non-empty lines
-      const lines = content.split('\n')
-        .map((line: string) => line.trim())
-        .filter((line: string) => line.length > 0);
-
-      if (lines.length >= 2) {
-        title = lines[0].replace(/^Title:\s*/i, '').trim();
-        description = lines[1].replace(/^Description:\s*/i, '').trim();
-      } else {
-        console.error("Could not parse content format:", content);
-        throw new Error("Invalid content format from API");
-      }
+    if (!titleMatch || !descriptionMatch) {
+      console.error("Could not parse content:", content);
+      throw new Error("Could not parse API response");
     }
 
-    if (!title || !description) {
-      console.error("Empty title or description:", { title, description });
-      throw new Error("Invalid content format from API");
-    }
-
-    const article = {
-      title,
-      description,
-      createdAt: new Date().toISOString(),
-      topic
+    // Update last API call time on success
+    lastApiCallTime = Date.now();
+    
+    return {
+      title: titleMatch[1].trim(),
+      description: descriptionMatch[1].trim(),
+      modelUsed: model,
     };
+  } catch (error: any) {
+    console.error(`Error with model ${model}:`, error.message);
 
-    console.log("Generated article:", article);
-    return article;
+    // Check if it's a rate limit error (429) or model not found (404)
+    const isRateLimit = error.status === 429 || error.message?.includes("rate-limited") || error.message?.includes("429");
+    const isNotFound = error.status === 404 || error.message?.includes("No endpoints found") || error.message?.includes("404");
+    
+    if (isRateLimit || isNotFound) {
+      // Try next model immediately
+      console.log(`Model ${model} unavailable (${isRateLimit ? 'rate limited' : 'not found'}), trying next model...`);
+      return generateAIContent(topic, 0, modelIndex + 1);
+    }
 
-  } catch (error) {
-    console.error("Error in generateAIContent:", error);
-    throw error;
+    // For other transient errors, retry with exponential backoff up to 2 times
+    if (attempt < 2) {
+      const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+      console.log(`Retrying in ${delay}ms...`);
+      await sleep(delay);
+      return generateAIContent(topic, attempt + 1, modelIndex);
+    }
+
+    // If retries exhausted, try next model
+    return generateAIContent(topic, 0, modelIndex + 1);
   }
 };
 
@@ -117,145 +128,25 @@ export async function POST(req: Request) {
     const { topic } = await req.json();
 
     if (!topic) {
-      return NextResponse.json(
-        { error: "Please enter a topic" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Please enter a topic" }, { status: 400 });
     }
 
     if (!OPENROUTER_API_KEY) {
-      return NextResponse.json(
-        { error: "API key is not configured" },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "API key is not configured" }, { status: 500 });
     }
 
     console.log("Generating content for topic:", topic);
 
-    const requestBody = {
-      model: "deepseek/deepseek-r1:free",
-      messages: [
-        {
-          role: "system",
-          content: "You are a content writer. Create a title and description for the given topic. Respond in this exact format:\nTitle: [your title here]\nDescription: [your description here]"
-        },
-        {
-          role: "user",
-          content: `Write about "${topic}"`
-        }
-      ],
-      max_tokens: 300,
-      temperature: 0.7,
-    };
+    const result = await generateAIContent(topic);
 
-    console.log("Sending request to OpenRouter:", JSON.stringify(requestBody, null, 2));
-
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    console.log("Response status:", response.status);
-
-    const responseText = await response.text();
-    console.log("Raw response:", responseText);
-
-    let data;
-    try {
-      data = JSON.parse(responseText);
-    } catch (e) {
-      console.error("Failed to parse response as JSON:", e);
-      return NextResponse.json(
-        { error: "Invalid response from API", details: e instanceof Error ? e.message : String(e) },
-        { status: 500 }
-      );
-    }
-
-    if (!response.ok) {
-      console.error("API Error Response:", data);
-      return NextResponse.json(
-        { error: data.error?.message || "Failed to generate content", details: data },
-        { status: response.status }
-      );
-    }
-
-    // Log the full response structure
-    console.log("Parsed response data:", JSON.stringify(data, null, 2));
-
-    // Get content from the response
-    const content = data.choices?.[0]?.message?.content;
-
-    if (!content) {
-      console.error("No content found in response structure:", data);
-      
-      // Check if there's a refusal or reasoning in the response
-      const refusal = data.choices?.[0]?.message?.refusal;
-      const reasoning = data.choices?.[0]?.message?.reasoning;
-      
-      if (refusal || reasoning) {
-        return NextResponse.json(
-          { 
-            error: "Content generation failed", 
-            details: refusal || reasoning || "The model provided reasoning but no content"
-          },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json(
-        { 
-          error: "No content received from API", 
-          details: "Response structure: " + JSON.stringify(data)
-        },
-        { status: 500 }
-      );
-    }
-
-    // Extract title and description
-    const titleMatch = content.match(/Title:\s*(.+?)(?:\n|$)/i);
-    const descriptionMatch = content.match(/Description:\s*(.+?)(?:\n|$)/i);
-
-    if (!titleMatch || !descriptionMatch) {
-      console.error("Could not parse content:", content);
-      
-      // Try to extract content from reasoning if available
-      const reasoning = data.choices?.[0]?.message?.reasoning;
-      if (reasoning) {
-        const reasoningTitle = reasoning.match(/title.*?:?\s*(.+?)(?:\n|$)/i);
-        const reasoningDesc = reasoning.match(/description.*?:?\s*(.+?)(?:\n|$)/i);
-        
-        if (reasoningTitle && reasoningDesc) {
-          return NextResponse.json({
-            title: reasoningTitle[1].trim(),
-            description: reasoningDesc[1].trim()
-          });
-        }
-      }
-
-      return NextResponse.json(
-        { 
-          error: "Could not parse API response", 
-          details: "Content format: " + content 
-        },
-        { status: 500 }
-      );
-    }
-
-    const title = titleMatch[1].trim();
-    const description = descriptionMatch[1].trim();
-
-    return NextResponse.json({
-      title,
-      description
-    });
-  } catch (error) {
+    return NextResponse.json(result);
+  } catch (error: any) {
     console.error("Error in generate route:", error);
     return NextResponse.json(
-      { error: "Internal server error", details: error instanceof Error ? error.message : String(error) },
+      {
+        error: error.message || "Failed to generate content",
+        details: error.stack,
+      },
       { status: 500 }
     );
   }

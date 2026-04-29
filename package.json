@@ -10,9 +10,13 @@
   },
   "dependencies": {
     "@firebase/firestore": "^4.7.10",
+    "@types/mongoose": "^5.11.96",
     "date-fns": "^4.1.0",
     "firebase": "^11.6.0",
+    "lucide-react": "^1.14.0",
+    "mongoose": "^9.6.1",
     "next": "14.0.4",
+    "openai": "^6.35.0",
     "react": "^18",
     "react-dom": "^18"
   },
