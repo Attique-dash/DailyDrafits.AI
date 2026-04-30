@@ -10,10 +10,8 @@ export async function GET() {
     return NextResponse.json({ articles });
   } catch (error) {
     console.error('Error fetching articles:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch articles' },
-      { status: 500 }
-    );
+    // Return empty array if MongoDB is not connected
+    return NextResponse.json({ articles: [] });
   }
 }
 
@@ -22,7 +20,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     await connectDB();
-    
+
     const article = await Article.create({
       title: body.title,
       description: body.description,
@@ -34,13 +32,14 @@ export async function POST(req: Request) {
       publishedAt: body.publishedAt || new Date(),
       status: body.status || 'saved',
     });
-    
+
     return NextResponse.json({ article }, { status: 201 });
   } catch (error) {
     console.error('Error creating article:', error);
+    // Return error but don't crash
     return NextResponse.json(
-      { error: 'Failed to create article' },
-      { status: 500 }
+      { error: 'Failed to create article', articles: [] },
+      { status: 503 }
     );
   }
 }

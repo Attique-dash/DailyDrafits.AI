@@ -7,13 +7,17 @@ declare global {
 const MONGODB_URI = process.env.MONGODB_URI || process.env.Mongodb_Url;
 
 if (!MONGODB_URI) {
-  throw new Error('Please define the MONGODB_URI environment variable inside .env');
+  console.warn('MONGODB_URI not defined - MongoDB features will be disabled');
 }
 
 let cached = global.mongoose ?? { conn: null, promise: null };
 global.mongoose = cached;
 
 async function connectDB() {
+  if (!MONGODB_URI) {
+    throw new Error('MongoDB URI not configured');
+  }
+
   if (cached.conn) {
     return cached.conn;
   }

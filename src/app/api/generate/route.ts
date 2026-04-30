@@ -62,7 +62,7 @@ const generateAIContent = async (topic: string, attempt = 0, modelIndex = 0): Pr
       messages: [
         {
           role: "system",
-          content: "You are a content writer. Create a title and description for the given topic. Respond in this exact format:\nTitle: [your title here]\nDescription: [your description here]",
+          content: "You are a professional content writer. Create an engaging article title and detailed description for the given topic.\n\nRespond ONLY in this exact format:\nTitle: [create an engaging, specific title about the topic - 5-10 words]\nDescription: [write a detailed, informative description of 150-200 words about the topic]\n\nDo NOT use placeholder text like '[your title here]'. Write actual, meaningful content.",
         },
         {
           role: "user",
