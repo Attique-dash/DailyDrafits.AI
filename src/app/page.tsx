@@ -52,12 +52,12 @@ const deleteArticle = async (id: string) => {
 };
 
 // Analytics helpers
-const updateAnalytics = async (topic: string) => {
+const updateAnalytics = async (topic: string, currentAnalytics: any) => {
   try {
     const now = new Date();
     const today = now.toDateString();
     
-    // Get current analytics
+    // Get current analytics from DB
     const res = await fetch('/api/analytics');
     const data = await res.json();
     const analytics = data.analytics || { totalPosts: 0, todayPosts: 0, thisWeekPosts: 0, generatedTopics: {} };
@@ -82,8 +82,11 @@ const updateAnalytics = async (topic: string) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updatedAnalytics),
     });
+    
+    return updatedAnalytics;
   } catch (err) {
     console.error('Error updating analytics:', err);
+    return null;
   }
 };
 
@@ -102,8 +105,12 @@ export default function Home() {
   const [showStats, setShowStats] = useState(false);
   const [stopMessage, setStopMessage] = useState<string>("");
   const [pendingPosts, setPendingPosts] = useState<Map<string, { post: Article; timer: number; timerId: NodeJS.Timeout }>>(new Map());
+  const [postDisplayTimer, setPostDisplayTimer] = useState<number>(0);
+  const [hasActivePost, setHasActivePost] = useState<boolean>(false);
   const [expandedPosts, setExpandedPosts] = useState<Set<string>>(new Set());
   const [analytics, setAnalytics] = useState({ totalPosts: 0, todayPosts: 0, thisWeekPosts: 0 });
+  const [isAutoGenerating, setIsAutoGenerating] = useState<boolean>(false);
+  const autoGenerateTopicRef = useRef<string>("");
   const abortControllerRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const generatedTopicsRef = useRef<Record<string, number>>({});
@@ -137,6 +144,19 @@ export default function Home() {
     }
     return () => interval && clearInterval(interval);
   }, [cooldown]);
+
+  // Post display timer effect (2 minute timer when content is shown)
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (postDisplayTimer > 0) {
+      interval = setInterval(() => {
+        setPostDisplayTimer((prev) => prev <= 1 ? 0 : prev - 1);
+      }, 1000);
+    } else if (postDisplayTimer === 0 && hasActivePost) {
+      setHasActivePost(false);
+    }
+    return () => interval && clearInterval(interval);
+  }, [postDisplayTimer, hasActivePost]);
 
   const formatCooldown = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -238,8 +258,16 @@ export default function Home() {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    
+    // Stop all generation states
     setIsLoading(false);
-    setStopMessage("Generation stopped - Pending content discarded");
+    setIsAutoGenerating(false);
+    setStopMessage("Generation stopped");
+    setError(null);
+    
+    // Clear the post display timer completely
+    setPostDisplayTimer(0);
+    setHasActivePost(false);
     
     // Clear all pending post timers (don't save to MongoDB)
     pendingPosts.forEach((pending) => {
@@ -253,13 +281,10 @@ export default function Home() {
     
     setPendingPosts(new Map());
     
-    // Note: Cooldown timer continues - don't reset it
-    // The user still needs to wait before generating again
-    
-    // Clear stop message after 5 seconds, then cooldown timer shows naturally
+    // Clear stop message after 3 seconds
     setTimeout(() => {
       setStopMessage("");
-    }, 5000);
+    }, 3000);
   };
 
   const toggleExpandPost = (postId: string) => {
@@ -274,40 +299,76 @@ export default function Home() {
     });
   };
 
-  const handleGenerate = async () => {
-    if (!currentTopic) {
-      setError("Please enter a topic");
-      return;
-    }
-
+  const handleGenerateForTopic = async (topic: string, skipValidation = false) => {
+    if (!topic) return;
+    
+    // Store topic for auto-generation
+    autoGenerateTopicRef.current = topic;
+    
     const now = Date.now();
     const timeSinceLastClick = now - lastClickTime;
     if (timeSinceLastClick < COOLDOWN_SECONDS * 1000) {
       const remaining = Math.ceil((COOLDOWN_SECONDS * 1000 - timeSinceLastClick) / 1000);
       setError(`Please wait ${formatCooldown(remaining)} before generating again`);
       setCooldown(remaining);
+      // Stop auto-generation on cooldown
+      if (isAutoGenerating) {
+        setIsAutoGenerating(false);
+        setStopMessage("Stopped - Cooldown period active");
+        setTimeout(() => setStopMessage(""), 3000);
+      }
       return;
     }
 
     // Check for duplicate topic within 2 minutes
-    const topicKey = currentTopic.toLowerCase().trim();
+    const topicKey = topic.toLowerCase().trim();
     const lastGenerated = generatedTopicsRef.current[topicKey];
     if (lastGenerated && (now - lastGenerated) < 2 * 60 * 1000) {
       const remainingSeconds = Math.ceil((2 * 60 * 1000 - (now - lastGenerated)) / 1000);
       setError(`Please wait ${Math.ceil(remainingSeconds / 60)} minutes before generating the same topic again`);
+      // Stop auto-generation on duplicate
+      if (isAutoGenerating) {
+        setIsAutoGenerating(false);
+        setStopMessage("Stopped - Duplicate topic cooldown");
+        setTimeout(() => setStopMessage(""), 3000);
+      }
       return;
     }
+    
+    await performGenerate(topic, skipValidation);
+  };
+
+  const handleGenerate = async () => {
+    if (!currentTopic) {
+      setError("Please enter a topic");
+      return;
+    }
+    
+    // Enable auto-generation mode
+    setIsAutoGenerating(true);
+    autoGenerateTopicRef.current = currentTopic;
+    
+    await handleGenerateForTopic(currentTopic);
+  };
+
+  const performGenerate = async (topic: string, skipValidation = false) => {
+    if (!topic) return;
 
     setIsLoading(true);
     setError(null);
     setStopMessage("");
 
     try {
-      const validationError = await validateTopic(currentTopic);
-      if (validationError) {
-        setError(validationError);
-        setIsLoading(false);
-        return;
+      // Only validate on first manual generation, skip for auto-generation
+      if (!skipValidation) {
+        const validationError = await validateTopic(topic);
+        if (validationError) {
+          setError(validationError);
+          setIsLoading(false);
+          // Stop auto-generation on validation error
+          setIsAutoGenerating(false);
+          return;
+        }
       }
 
       // Create abort controller for this request
@@ -316,13 +377,19 @@ export default function Home() {
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: currentTopic }),
+        body: JSON.stringify({ topic: topic }),
         signal: abortControllerRef.current.signal,
       });
 
       const data = await response.json();
 
       if (!response.ok) {
+        // Stop auto-generation on API error
+        if (isAutoGenerating) {
+          setIsAutoGenerating(false);
+          setStopMessage("Auto-generation stopped - API error");
+          setTimeout(() => setStopMessage(""), 3000);
+        }
         throw new Error(data.error || "Failed to generate content");
       }
 
@@ -339,7 +406,7 @@ export default function Home() {
         title: cleanTitle,
         description: cleanDescription,
         createdAt: new Date().toISOString(),
-        topic: currentTopic,
+        topic: topic,
         url: '',
         urlToImage: '',
         tags: [],
@@ -352,12 +419,13 @@ export default function Home() {
       // IMPORTANT: Stop loading so content shows
       setIsLoading(false);
       
-      // Track this topic as generated
-      generatedTopicsRef.current[topicKey] = Date.now();
+      // Start the 2-minute post display timer
+      setPostDisplayTimer(120);
+      setHasActivePost(true);
       
-      // Clear topic input
-      setCurrentTopic("");
-      if (inputRef.current) inputRef.current.value = "";
+      // Track this topic as generated
+      const topicKey = topic.toLowerCase().trim();
+      generatedTopicsRef.current[topicKey] = Date.now();
 
       // Start 2-minute timer before saving to MongoDB
       const postId = newPost.id;
@@ -378,20 +446,39 @@ export default function Home() {
         if (remainingSeconds <= 0) {
           clearInterval(timerId);
           // Save to MongoDB after timer completes
-          createArticle(newPost).then(() => {
+          createArticle(newPost).then(async () => {
             console.log("Saved to MongoDB after timer:", postId);
             setPendingPosts(prev => {
               const next = new Map(prev);
               next.delete(postId);
               return next;
             });
-            // Update analytics
-            updateAnalytics(newPost.topic || '');
+            // Update analytics and refresh local state
+            const updatedAnalytics = await updateAnalytics(newPost.topic || '', analytics);
+            if (updatedAnalytics) {
+              setAnalytics({
+                totalPosts: updatedAnalytics.totalPosts || 0,
+                todayPosts: updatedAnalytics.todayPosts || 0,
+                thisWeekPosts: updatedAnalytics.thisWeekPosts || 0,
+              });
+            }
             // Update cooldown after successful save
             setLastClickTime(Date.now());
             setCooldown(COOLDOWN_SECONDS);
+            
+            // If auto-generating is enabled, generate next post with same topic
+            // Skip validation for subsequent auto-generated posts
+            if (isAutoGenerating && autoGenerateTopicRef.current) {
+              console.log("Auto-generating next post for topic:", autoGenerateTopicRef.current);
+              // Small delay before next generation
+              setTimeout(() => {
+                handleGenerateForTopic(autoGenerateTopicRef.current, true);
+              }, 1000);
+            }
           }).catch(err => {
             console.error("Failed to save to MongoDB:", err);
+            setError("Failed to save post. Stopped auto-generation.");
+            setIsAutoGenerating(false);
             setPendingPosts(prev => {
               const next = new Map(prev);
               next.delete(postId);
@@ -579,6 +666,24 @@ export default function Home() {
             </div>
           )}
 
+          {/* Post Display Timer with Stop Button */}
+          {postDisplayTimer > 0 && (
+            <div className="flex items-center justify-center gap-4 mb-6">
+              <div className="inline-flex items-center gap-3 bg-yellow-500/20 backdrop-blur-sm rounded-full px-6 py-3">
+                <Clock className="w-5 h-5 text-yellow-400 animate-pulse" />
+                <span className="text-white font-mono text-xl">{formatCooldown(postDisplayTimer)}</span>
+                <span className="text-yellow-400">remaining for next post</span>
+              </div>
+              <button
+                onClick={handleStop}
+                className="flex items-center gap-2 px-4 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-full transition-all border border-red-500/30"
+              >
+                <Square className="w-4 h-4" />
+                Stop
+              </button>
+            </div>
+          )}
+
           {/* Input Section */}
           <div className="bg-black/30 backdrop-blur-xl rounded-2xl p-1 border border-white/20 mb-6">
             <div className="flex flex-col md:flex-row gap-2">
@@ -590,18 +695,24 @@ export default function Home() {
                   onChange={(e) => setCurrentTopic(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && handleGenerate()}
                   placeholder="Enter a topic... (e.g., 'Future of Artificial Intelligence')"
-                  className="w-full px-6 py-4 bg-transparent text-white placeholder-gray-400 focus:outline-none"
+                  disabled={postDisplayTimer > 0 || isLoading}
+                  className="w-full px-6 py-4 bg-transparent text-white placeholder-gray-400 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                 />
               </div>
               <button
                 onClick={handleGenerate}
-                disabled={!currentTopic || isLoading || cooldown > 0}
+                disabled={!currentTopic || isLoading || cooldown > 0 || postDisplayTimer > 0}
                 className="px-8 py-4 rounded-xl bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold transition-all transform hover:scale-105 disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
               >
                 {isLoading ? (
                   <>
                     <Loader2 className="w-5 h-5 animate-spin" />
                     Generating...
+                  </>
+                ) : postDisplayTimer > 0 ? (
+                  <>
+                    <Clock className="w-5 h-5" />
+                    Wait {formatCooldown(postDisplayTimer)}
                   </>
                 ) : (
                   <>
@@ -722,20 +833,13 @@ export default function Home() {
                 return (
                   <div
                     key={post.id}
-                    className="group relative bg-gradient-to-br from-gray-900/90 to-gray-800/90 backdrop-blur-xl rounded-2xl overflow-hidden hover:shadow-2xl transition-all duration-300 transform hover:-translate-y-2 animate-fadeInUp flex flex-col h-[400px]"
+                    className="group relative bg-gradient-to-br from-gray-900/90 to-gray-800/90 backdrop-blur-xl rounded-2xl overflow-hidden hover:shadow-2xl transition-all duration-300 transform hover:-translate-y-2 animate-fadeInUp flex flex-col"
                     style={{ animationDelay: `${index * 100}ms` }}
                   >
                     {/* Gradient Border */}
                     <div className="absolute inset-0 bg-gradient-to-r from-blue-500 to-purple-600 opacity-0 group-hover:opacity-100 transition-opacity duration-300 rounded-2xl -z-10"></div>
                     <div className="absolute inset-[1px] bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl"></div>
                     
-                    {/* Pending Timer Badge */}
-                    {isPending && (
-                      <div className="absolute top-3 right-3 z-20 flex items-center gap-1 px-3 py-1 bg-yellow-500/20 text-yellow-400 rounded-full text-xs font-medium">
-                        <Clock className="w-3 h-3 animate-pulse" />
-                        {Math.ceil((pendingData?.timer || 0) / 60)}:{((pendingData?.timer || 0) % 60).toString().padStart(2, '0')}
-                      </div>
-                    )}
                     
                     <div className="relative p-6 flex flex-col h-full">
                       <div className="flex justify-between items-start mb-4">
@@ -765,8 +869,8 @@ export default function Home() {
                         </button>
                       </div>
                       
-                      {/* Scrollable content area with fixed height */}
-                      <div className="flex-1 overflow-hidden relative">
+                      {/* Scrollable content area */}
+                      <div className="flex-1 overflow-hidden relative min-h-[120px]">
                         <div 
                           className={`text-gray-300 leading-relaxed transition-all duration-300 ${
                             isExpanded ? 'overflow-y-auto max-h-[200px] pr-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-transparent' : 'line-clamp-4'
@@ -783,7 +887,7 @@ export default function Home() {
                       
                       {/* Read More / Read Less Button */}
                       {post.description.length > 150 && (
-                        <div className="mt-4 pt-4 border-t border-white/10">
+                        <div className="mt-auto pt-3 border-t border-white/10">
                           <button 
                             onClick={() => toggleExpandPost(post.id)}
                             className="text-sm text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1"

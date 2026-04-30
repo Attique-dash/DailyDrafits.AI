@@ -40,7 +40,11 @@ export async function POST(req: Request) {
       analytics.thisWeekPosts = body.thisWeekPosts ?? analytics.thisWeekPosts;
       analytics.lastUpdated = new Date();
       if (body.generatedTopics) {
-        analytics.generatedTopics = { ...analytics.generatedTopics, ...body.generatedTopics };
+        // Convert Mongoose Map to plain object to avoid casting errors
+        const currentTopics = analytics.generatedTopics instanceof Map 
+          ? Object.fromEntries(analytics.generatedTopics)
+          : analytics.generatedTopics || {};
+        analytics.generatedTopics = { ...currentTopics, ...body.generatedTopics };
       }
       await analytics.save();
     }
