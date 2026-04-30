@@ -1,19 +1,18 @@
 "use client";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Article } from "@/app/types/article";
 import Image from "next/image";
 import logo from "../../public/Images/Logo.png";
-import { 
-  Sparkles, 
-  Trash2, 
-  Clock, 
-  ChevronLeft, 
-  ChevronRight, 
+import {
+  Sparkles,
+  Trash2,
+  Clock,
+  ChevronLeft,
+  ChevronRight,
   Zap,
   TrendingUp,
   BookOpen,
   AlertCircle,
-  XCircle,
   Loader2,
   Calendar,
   Hash,
@@ -22,74 +21,58 @@ import {
   Users,
   Heart,
   Square,
-  ChevronUp
+  ChevronUp,
+  BarChart3,
+  FileText,
+  RefreshCw,
 } from "lucide-react";
 
-// MongoDB API helpers
+// ─── API helpers ────────────────────────────────────────────────────────────
 const fetchArticles = async () => {
-  const res = await fetch('/api/articles');
-  if (!res.ok) throw new Error('Failed to fetch');
+  const res = await fetch("/api/articles");
+  if (!res.ok) throw new Error("Failed to fetch");
   const data = await res.json();
   return data.articles || [];
 };
 
 const createArticle = async (article: any) => {
-  const res = await fetch('/api/articles', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const res = await fetch("/api/articles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(article),
   });
-  if (!res.ok) throw new Error('Failed to create');
+  if (!res.ok) throw new Error("Failed to create");
   return res.json();
 };
 
 const deleteArticle = async (id: string) => {
-  const res = await fetch(`/api/articles/${id}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) throw new Error('Failed to delete');
+  const res = await fetch(`/api/articles/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete");
   return res.json();
 };
 
-// Analytics helpers
-const updateAnalytics = async (topic: string, currentAnalytics: any) => {
-  try {
-    const now = new Date();
-    const today = now.toDateString();
-    
-    // Get current analytics from DB
-    const res = await fetch('/api/analytics');
-    const data = await res.json();
-    const analytics = data.analytics || { totalPosts: 0, todayPosts: 0, thisWeekPosts: 0, generatedTopics: {} };
-    
-    // Check if last update was today
-    const lastUpdated = analytics.lastUpdated ? new Date(analytics.lastUpdated).toDateString() : null;
-    const isToday = lastUpdated === today;
-    
-    // Calculate this week
-    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const isThisWeek = analytics.lastUpdated ? new Date(analytics.lastUpdated) > weekAgo : false;
-    
-    const updatedAnalytics = {
-      totalPosts: (analytics.totalPosts || 0) + 1,
-      todayPosts: isToday ? (analytics.todayPosts || 0) + 1 : 1,
-      thisWeekPosts: isThisWeek ? (analytics.thisWeekPosts || 0) + 1 : 1,
-      generatedTopics: { ...analytics.generatedTopics, [topic]: now.toISOString() },
-    };
-    
-    await fetch('/api/analytics', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedAnalytics),
-    });
-    
-    return updatedAnalytics;
-  } catch (err) {
-    console.error('Error updating analytics:', err);
-    return null;
-  }
+const fetchAnalyticsAPI = async () => {
+  const res = await fetch("/api/analytics");
+  const data = await res.json();
+  return data.analytics || { totalPosts: 0, todayPosts: 0, thisWeekPosts: 0 };
 };
 
+const postAnalytics = async (payload: any) => {
+  await fetch("/api/analytics", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+};
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+interface PendingEntry {
+  post: Article;
+  timer: number;
+  timerId: ReturnType<typeof setInterval>;
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
 export default function Home() {
   const [posts, setPosts] = useState<Article[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -99,428 +82,337 @@ export default function Home() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [postToDelete, setPostToDelete] = useState<string | null>(null);
   const [cooldown, setCooldown] = useState(0);
-  const [lastClickTime, setLastClickTime] = useState<number>(0);
-  const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [selectedCategory, setSelectedCategory] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [showStats, setShowStats] = useState(false);
-  const [stopMessage, setStopMessage] = useState<string>("");
-  const [pendingPosts, setPendingPosts] = useState<Map<string, { post: Article; timer: number; timerId: NodeJS.Timeout }>>(new Map());
-  const [postDisplayTimer, setPostDisplayTimer] = useState<number>(0);
-  const [hasActivePost, setHasActivePost] = useState<boolean>(false);
+  const [stopMessage, setStopMessage] = useState("");
+  const [pendingPosts, setPendingPosts] = useState<Map<string, PendingEntry>>(new Map());
   const [expandedPosts, setExpandedPosts] = useState<Set<string>>(new Set());
   const [analytics, setAnalytics] = useState({ totalPosts: 0, todayPosts: 0, thisWeekPosts: 0 });
-  const [isAutoGenerating, setIsAutoGenerating] = useState<boolean>(false);
-  const autoGenerateTopicRef = useRef<string>("");
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const generatedTopicsRef = useRef<Record<string, number>>({});
-  
-  const postsPerPage = 6;
-  const COOLDOWN_SECONDS = 120;
+  const [isAutoGenerating, setIsAutoGenerating] = useState(false);
 
-  // Popular topics suggestions
+  // ── Refs (never stale inside callbacks) ──────────────────────────────────
+  const isAutoGeneratingRef = useRef(false);
+  const autoTopicRef = useRef("");
+  const abortRef = useRef<AbortController | null>(null);
+  const lastClickTimeRef = useRef(0);
+  const generatedTopicsRef = useRef<Record<string, number>>({});
+  const cooldownRef = useRef(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Keep ref in sync with state
+  const setAutoGenerating = (val: boolean) => {
+    isAutoGeneratingRef.current = val;
+    setIsAutoGenerating(val);
+  };
+
+  const COOLDOWN_SECONDS = 120;
+  const postsPerPage = 6;
+
   const popularTopics = [
-    "Artificial Intelligence", "Climate Change", "Space Exploration", 
+    "Artificial Intelligence", "Climate Change", "Space Exploration",
     "Web Development", "Digital Marketing", "Mental Health",
-    "Sustainable Living", "Blockchain", "Renewable Energy"
+    "Sustainable Living", "Blockchain", "Renewable Energy",
   ];
 
-  // Categories for filtering
   const categories = [
     { id: "all", name: "All Posts", icon: Globe },
     { id: "technology", name: "Technology", icon: Zap },
     { id: "science", name: "Science", icon: TrendingUp },
     { id: "business", name: "Business", icon: Users },
-    { id: "health", name: "Health", icon: Heart }
+    { id: "health", name: "Health", icon: Heart },
   ];
 
-  // Cooldown timer effect
+  // ── Cooldown timer ─────────────────────────────────────────────────────────
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (cooldown > 0) {
-      interval = setInterval(() => {
-        setCooldown((prev) => prev <= 1 ? 0 : prev - 1);
-      }, 1000);
-    }
-    return () => interval && clearInterval(interval);
+    if (cooldown <= 0) return;
+    const id = setInterval(() => {
+      setCooldown((prev) => {
+        const next = prev <= 1 ? 0 : prev - 1;
+        cooldownRef.current = next;
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(id);
   }, [cooldown]);
 
-  // Post display timer effect (2 minute timer when content is shown)
+  const formatTime = (s: number) =>
+    `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+  // ── Fetch on mount ─────────────────────────────────────────────────────────
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (postDisplayTimer > 0) {
-      interval = setInterval(() => {
-        setPostDisplayTimer((prev) => prev <= 1 ? 0 : prev - 1);
-      }, 1000);
-    } else if (postDisplayTimer === 0 && hasActivePost) {
-      setHasActivePost(false);
-    }
-    return () => interval && clearInterval(interval);
-  }, [postDisplayTimer, hasActivePost]);
+    (async () => {
+      try {
+        const articles = await fetchArticles();
+        const mapped: Article[] = articles.map((a: any) => ({
+          ...a,
+          id: a._id || a.id,
+        }));
+        setPosts(mapped.sort((a, b) =>
+          new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        ));
+      } catch { /* silent */ }
+    })();
 
-  const formatCooldown = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const fetchPosts = async () => {
-    try {
-      const articles = await fetchArticles();
-      const postsData: Article[] = articles.map((article: any) => ({
-        ...article,
-        id: article._id || article.id,
-      }));
-      const sortedPosts = postsData.sort((a, b) => 
-        new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-      );
-      setPosts(sortedPosts);
-    } catch (err) {
-      console.error("Error fetching posts:", err);
-    }
-  };
-
-  useEffect(() => {
-    fetchPosts();
-    fetchAnalytics();
+    (async () => {
+      try {
+        const a = await fetchAnalyticsAPI();
+        setAnalytics({ totalPosts: a.totalPosts || 0, todayPosts: a.todayPosts || 0, thisWeekPosts: a.thisWeekPosts || 0 });
+      } catch { /* silent */ }
+    })();
   }, []);
 
-  const deletePost = async (postId: string) => {
-    if (!postId) return;
-    try {
-      // Check if it's a pending post
-      if (pendingPosts.has(postId)) {
-        const pending = pendingPosts.get(postId);
-        if (pending) {
-          clearInterval(pending.timerId);
-        }
-        setPendingPosts(prev => {
-          const next = new Map(prev);
-          next.delete(postId);
-          return next;
-        });
-        setPosts(prevPosts => prevPosts.filter(post => post.id !== postId));
-        setShowDeleteConfirm(false);
-        setPostToDelete(null);
-        return;
-      }
-      
-      // Delete from MongoDB
-      await deleteArticle(postId);
-      setPosts((prevPosts) => prevPosts.filter(post => post.id !== postId));
-      setShowDeleteConfirm(false);
-      setPostToDelete(null);
-    } catch (err) {
-      console.error("Error deleting post:", err);
-      setError("Failed to delete post");
+  // ── Delete ─────────────────────────────────────────────────────────────────
+  const deletePost = async (id: string) => {
+    if (!id) return;
+    const pending = pendingPosts.get(id);
+    if (pending) {
+      clearInterval(pending.timerId);
+      setPendingPosts((prev) => { const n = new Map(prev); n.delete(id); return n; });
+      setPosts((prev) => prev.filter((p) => p.id !== id));
+    } else {
+      try {
+        await deleteArticle(id);
+        setPosts((prev) => prev.filter((p) => p.id !== id));
+      } catch { setError("Failed to delete post"); }
     }
-  };
-
-  const handleDeleteClick = (postId: string) => {
-    setPostToDelete(postId);
-    setShowDeleteConfirm(true);
-  };
-
-  const handleCancelDelete = () => {
-    setPostToDelete(null);
     setShowDeleteConfirm(false);
+    setPostToDelete(null);
   };
 
+  // ── Stop ───────────────────────────────────────────────────────────────────
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setAutoGenerating(false);
+    setIsLoading(false);
+
+    // Clear all pending timers and remove pending posts from UI
+    setPendingPosts((prev) => {
+      prev.forEach((entry) => {
+        clearInterval(entry.timerId);
+        setPosts((p) => p.filter((post) => post.id !== entry.post.id));
+      });
+      return new Map();
+    });
+
+    setStopMessage("Generation stopped");
+    setTimeout(() => setStopMessage(""), 3000);
+  }, []);
+
+  // ── Validate ───────────────────────────────────────────────────────────────
   const validateTopic = async (topic: string): Promise<string | null> => {
     if (!topic) return "Please enter a topic";
-    if (topic.length < 3) return "Topic must be at least 3 characters long";
-    if (topic.length > 50) return "Topic must be less than 50 characters long";
-    
-    const validTopicRegex = /^[a-zA-Z0-9\s\-.,!?]+$/;
-    if (!validTopicRegex.test(topic)) {
-      return "Topic contains invalid characters";
-    }
+    if (topic.length < 3) return "Topic must be at least 3 characters";
+    if (topic.length > 50) return "Topic must be less than 50 characters";
+    if (!/^[a-zA-Z0-9\s\-.,!?]+$/.test(topic)) return "Topic contains invalid characters";
 
     try {
-      const response = await fetch("/api/validate-topic", {
+      const res = await fetch("/api/validate-topic", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ topic }),
       });
-      const data = await response.json();
-      if (!data.isValid) {
-        return data.message || "Please enter a valid topic";
-      }
-    } catch (error) {
-      console.error("Error validating topic:", error);
-      return "Unable to validate topic. Please try again.";
+      const data = await res.json();
+      if (!data.isValid) return data.message || "Please enter a valid topic";
+    } catch {
+      return null; // accept if validation service fails
     }
     return null;
   };
 
-  const handleStop = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    
-    // Stop all generation states
-    setIsLoading(false);
-    setIsAutoGenerating(false);
-    setStopMessage("Generation stopped");
-    setError(null);
-    
-    // Clear the post display timer completely
-    setPostDisplayTimer(0);
-    setHasActivePost(false);
-    
-    // Clear all pending post timers (don't save to MongoDB)
-    pendingPosts.forEach((pending) => {
-      clearInterval(pending.timerId);
-    });
-    
-    // Remove pending posts from UI
-    pendingPosts.forEach((pending) => {
-      setPosts(prev => prev.filter(p => p.id !== pending.post.id));
-    });
-    
-    setPendingPosts(new Map());
-    
-    // Clear stop message after 3 seconds
-    setTimeout(() => {
-      setStopMessage("");
-    }, 3000);
-  };
-
-  const toggleExpandPost = (postId: string) => {
-    setExpandedPosts(prev => {
-      const next = new Set(prev);
-      if (next.has(postId)) {
-        next.delete(postId);
-      } else {
-        next.add(postId);
-      }
-      return next;
-    });
-  };
-
-  const handleGenerateForTopic = async (topic: string, skipValidation = false) => {
+  // ── Core generate (called recursively for auto-gen) ────────────────────────
+  const performGenerate = useCallback(async (topic: string, skipValidation = false) => {
     if (!topic) return;
-    
-    // Store topic for auto-generation
-    autoGenerateTopicRef.current = topic;
-    
+
+    // ── Cooldown check (using ref so always fresh) ──
     const now = Date.now();
-    const timeSinceLastClick = now - lastClickTime;
-    if (timeSinceLastClick < COOLDOWN_SECONDS * 1000) {
-      const remaining = Math.ceil((COOLDOWN_SECONDS * 1000 - timeSinceLastClick) / 1000);
-      setError(`Please wait ${formatCooldown(remaining)} before generating again`);
+    const elapsed = now - lastClickTimeRef.current;
+    if (elapsed < COOLDOWN_SECONDS * 1000) {
+      const remaining = Math.ceil((COOLDOWN_SECONDS * 1000 - elapsed) / 1000);
+      setError(`Please wait ${formatTime(remaining)} before generating again`);
       setCooldown(remaining);
-      // Stop auto-generation on cooldown
-      if (isAutoGenerating) {
-        setIsAutoGenerating(false);
-        setStopMessage("Stopped - Cooldown period active");
-        setTimeout(() => setStopMessage(""), 3000);
-      }
+      cooldownRef.current = remaining;
+      setAutoGenerating(false);
       return;
     }
 
-    // Check for duplicate topic within 2 minutes
+    // ── Duplicate topic check ──
     const topicKey = topic.toLowerCase().trim();
-    const lastGenerated = generatedTopicsRef.current[topicKey];
-    if (lastGenerated && (now - lastGenerated) < 2 * 60 * 1000) {
-      const remainingSeconds = Math.ceil((2 * 60 * 1000 - (now - lastGenerated)) / 1000);
-      setError(`Please wait ${Math.ceil(remainingSeconds / 60)} minutes before generating the same topic again`);
-      // Stop auto-generation on duplicate
-      if (isAutoGenerating) {
-        setIsAutoGenerating(false);
-        setStopMessage("Stopped - Duplicate topic cooldown");
-        setTimeout(() => setStopMessage(""), 3000);
-      }
+    const lastGen = generatedTopicsRef.current[topicKey];
+    if (lastGen && (now - lastGen) < 2 * 60 * 1000) {
+      const remaining = Math.ceil((2 * 60 * 1000 - (now - lastGen)) / 1000);
+      setError(`Wait ${Math.ceil(remaining / 60)} min before generating the same topic again`);
+      setAutoGenerating(false);
       return;
     }
-    
-    await performGenerate(topic, skipValidation);
-  };
-
-  const handleGenerate = async () => {
-    if (!currentTopic) {
-      setError("Please enter a topic");
-      return;
-    }
-    
-    // Enable auto-generation mode
-    setIsAutoGenerating(true);
-    autoGenerateTopicRef.current = currentTopic;
-    
-    await handleGenerateForTopic(currentTopic);
-  };
-
-  const performGenerate = async (topic: string, skipValidation = false) => {
-    if (!topic) return;
 
     setIsLoading(true);
     setError(null);
     setStopMessage("");
 
     try {
-      // Only validate on first manual generation, skip for auto-generation
       if (!skipValidation) {
-        const validationError = await validateTopic(topic);
-        if (validationError) {
-          setError(validationError);
+        const validErr = await validateTopic(topic);
+        if (validErr) {
+          setError(validErr);
           setIsLoading(false);
-          // Stop auto-generation on validation error
-          setIsAutoGenerating(false);
+          setAutoGenerating(false);
           return;
         }
       }
 
-      // Create abort controller for this request
-      abortControllerRef.current = new AbortController();
-
-      const response = await fetch("/api/generate", {
+      abortRef.current = new AbortController();
+      const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic }),
-        signal: abortControllerRef.current.signal,
+        body: JSON.stringify({ topic }),
+        signal: abortRef.current.signal,
       });
 
-      const data = await response.json();
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to generate content");
 
-      if (!response.ok) {
-        // Stop auto-generation on API error
-        if (isAutoGenerating) {
-          setIsAutoGenerating(false);
-          setStopMessage("Auto-generation stopped - API error");
-          setTimeout(() => setStopMessage(""), 3000);
-        }
-        throw new Error(data.error || "Failed to generate content");
-      }
+      if (data.modelUsed) console.log("Model used:", data.modelUsed);
 
-      // Log model used to console only (not on page)
-      if (data.modelUsed) {
-        console.log("Model used:", data.modelUsed);
-      }
-
-      const cleanTitle = data.title.replace(/\*\*|\*|`|#/g, '').trim();
-      const cleanDescription = data.description.replace(/\*\*|\*|`|#/g, '').trim();
-
+      const clean = (s: string) => s.replace(/\*\*|\*|`|#/g, "").trim();
       const newPost: Article = {
-        id: Date.now().toString(),
-        title: cleanTitle,
-        description: cleanDescription,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        title: clean(data.title),
+        description: clean(data.description),
         createdAt: new Date().toISOString(),
-        topic: topic,
-        url: '',
-        urlToImage: '',
+        topic,
+        url: "",
+        urlToImage: "",
         tags: [],
-        publishedAt: new Date().toISOString()
+        publishedAt: new Date().toISOString(),
       };
 
-      // Add to UI immediately
       setPosts((prev) => [newPost, ...prev]);
-      
-      // IMPORTANT: Stop loading so content shows
       setIsLoading(false);
-      
-      // Start the 2-minute post display timer
-      setPostDisplayTimer(120);
-      setHasActivePost(true);
-      
-      // Track this topic as generated
-      const topicKey = topic.toLowerCase().trim();
+
+      // Track this topic as generated right away (prevents duplicate re-generation)
       generatedTopicsRef.current[topicKey] = Date.now();
 
-      // Start 2-minute timer before saving to MongoDB
+      // ── 2-minute save timer ────────────────────────────────────────────────
       const postId = newPost.id;
-      let remainingSeconds = 120;
-      
-      const timerId = setInterval(() => {
-        remainingSeconds--;
-        
-        setPendingPosts(prev => {
-          const next = new Map(prev);
-          const current = next.get(postId);
-          if (current) {
-            next.set(postId, { ...current, timer: remainingSeconds });
-          }
-          return next;
+      let remaining = 120;
+
+      const timerId = setInterval(async () => {
+        remaining--;
+
+        // Update the visual countdown in the map
+        setPendingPosts((prev) => {
+          if (!prev.has(postId)) return prev;
+          const n = new Map(prev);
+          n.set(postId, { ...n.get(postId)!, timer: remaining });
+          return n;
         });
-        
-        if (remainingSeconds <= 0) {
-          clearInterval(timerId);
-          // Save to MongoDB after timer completes
-          createArticle(newPost).then(async () => {
-            console.log("Saved to MongoDB after timer:", postId);
-            setPendingPosts(prev => {
-              const next = new Map(prev);
-              next.delete(postId);
-              return next;
-            });
-            // Update analytics and refresh local state
-            const updatedAnalytics = await updateAnalytics(newPost.topic || '', analytics);
-            if (updatedAnalytics) {
-              setAnalytics({
-                totalPosts: updatedAnalytics.totalPosts || 0,
-                todayPosts: updatedAnalytics.todayPosts || 0,
-                thisWeekPosts: updatedAnalytics.thisWeekPosts || 0,
-              });
-            }
-            // Update cooldown after successful save
-            setLastClickTime(Date.now());
-            setCooldown(COOLDOWN_SECONDS);
-            
-            // If auto-generating is enabled, generate next post with same topic
-            // Skip validation for subsequent auto-generated posts
-            if (isAutoGenerating && autoGenerateTopicRef.current) {
-              console.log("Auto-generating next post for topic:", autoGenerateTopicRef.current);
-              // Small delay before next generation
-              setTimeout(() => {
-                handleGenerateForTopic(autoGenerateTopicRef.current, true);
-              }, 1000);
-            }
-          }).catch(err => {
-            console.error("Failed to save to MongoDB:", err);
-            setError("Failed to save post. Stopped auto-generation.");
-            setIsAutoGenerating(false);
-            setPendingPosts(prev => {
-              const next = new Map(prev);
-              next.delete(postId);
-              return next;
-            });
+
+        if (remaining > 0) return;
+
+        // ── Timer elapsed → save ──
+        clearInterval(timerId);
+
+        try {
+          await createArticle(newPost);
+          console.log("Saved to MongoDB:", postId);
+
+          // Remove from pending
+          setPendingPosts((prev) => {
+            const n = new Map(prev);
+            n.delete(postId);
+            return n;
+          });
+
+          // Update analytics
+          const freshAnalytics = await fetchAnalyticsAPI();
+          const now2 = new Date();
+          const today = now2.toDateString();
+          const lastUpdated = freshAnalytics.lastUpdated
+            ? new Date(freshAnalytics.lastUpdated).toDateString()
+            : null;
+          const weekAgo = new Date(now2.getTime() - 7 * 24 * 60 * 60 * 1000);
+          const isThisWeek = freshAnalytics.lastUpdated
+            ? new Date(freshAnalytics.lastUpdated) > weekAgo
+            : false;
+
+          const updated = {
+            totalPosts: (freshAnalytics.totalPosts || 0) + 1,
+            todayPosts: lastUpdated === today ? (freshAnalytics.todayPosts || 0) + 1 : 1,
+            thisWeekPosts: isThisWeek ? (freshAnalytics.thisWeekPosts || 0) + 1 : 1,
+            generatedTopics: {
+              ...(freshAnalytics.generatedTopics || {}),
+              [topic]: now2.toISOString(),
+            },
+          };
+          await postAnalytics(updated);
+          setAnalytics({ totalPosts: updated.totalPosts, todayPosts: updated.todayPosts, thisWeekPosts: updated.thisWeekPosts });
+
+          // Update cooldown (use ref so future calls see it immediately)
+          lastClickTimeRef.current = Date.now();
+          setCooldown(COOLDOWN_SECONDS);
+          cooldownRef.current = COOLDOWN_SECONDS;
+
+          // ── Auto-generate next post (use ref — never stale) ──
+          if (isAutoGeneratingRef.current && autoTopicRef.current) {
+            console.log("Auto-generating next for:", autoTopicRef.current);
+            setTimeout(() => {
+              performGenerate(autoTopicRef.current, true);
+            }, 1500);
+          }
+        } catch (err) {
+          console.error("Failed to save:", err);
+          setError("Failed to save post. Stopped auto-generation.");
+          setAutoGenerating(false);
+          setPendingPosts((prev) => {
+            const n = new Map(prev);
+            n.delete(postId);
+            return n;
           });
         }
       }, 1000);
-      
-      // Store pending post with timer
-      setPendingPosts(prev => {
-        const next = new Map(prev);
-        next.set(postId, { post: newPost, timer: remainingSeconds, timerId });
-        return next;
+
+      // Register pending entry
+      setPendingPosts((prev) => {
+        const n = new Map(prev);
+        n.set(postId, { post: newPost, timer: remaining, timerId });
+        return n;
       });
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.log("Request was aborted");
-        // Don't set error here, handleStop already shows message
+
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        // handled by handleStop
       } else {
-        console.error("Error:", error);
-        setError(error instanceof Error ? error.message : "An error occurred");
+        setError(err.message || "An error occurred");
+        setAutoGenerating(false);
       }
-    } finally {
       setIsLoading(false);
-      abortControllerRef.current = null;
+      abortRef.current = null;
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Public generate trigger ────────────────────────────────────────────────
+  const handleGenerate = () => {
+    if (!currentTopic.trim()) { setError("Please enter a topic"); return; }
+    setAutoGenerating(true);
+    autoTopicRef.current = currentTopic.trim();
+    performGenerate(currentTopic.trim(), false);
   };
 
-  // Filter posts based on category and search
-  const filteredPosts = posts.filter(post => {
-    const matchesSearch = searchTerm === "" || 
-      post.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      post.description.toLowerCase().includes(searchTerm.toLowerCase());
-    
-    const matchesCategory = selectedCategory === "all" || 
-      (selectedCategory === "technology" && post.topic?.toLowerCase().match(/ai|tech|programming|web|digital/i)) ||
-      (selectedCategory === "science" && post.topic?.toLowerCase().match(/science|space|climate|biology/i)) ||
-      (selectedCategory === "business" && post.topic?.toLowerCase().match(/business|market|finance|economy/i)) ||
-      (selectedCategory === "health" && post.topic?.toLowerCase().match(/health|mental|wellness|fitness/i));
-    
-    return matchesSearch && matchesCategory;
+  // ── Filtering & pagination ─────────────────────────────────────────────────
+  const filteredPosts = posts.filter((p) => {
+    const s = searchTerm.toLowerCase();
+    const matchSearch = !s || p.title.toLowerCase().includes(s) || p.description.toLowerCase().includes(s);
+    const t = (p.topic || "").toLowerCase();
+    const matchCat =
+      selectedCategory === "all" ||
+      (selectedCategory === "technology" && /ai|tech|programming|web|digital/.test(t)) ||
+      (selectedCategory === "science" && /science|space|climate|biology/.test(t)) ||
+      (selectedCategory === "business" && /business|market|finance|economy/.test(t)) ||
+      (selectedCategory === "health" && /health|mental|wellness|fitness/.test(t));
+    return matchSearch && matchCat;
   });
 
   const totalPages = Math.ceil(filteredPosts.length / postsPerPage);
@@ -529,61 +421,51 @@ export default function Home() {
     currentPage * postsPerPage
   );
 
-  // Statistics from database
-  const stats = {
-    total: analytics.totalPosts,
-    today: analytics.todayPosts,
-    thisWeek: analytics.thisWeekPosts
-  };
-  
-  // Fetch analytics on load
-  const fetchAnalytics = async () => {
-    try {
-      const res = await fetch('/api/analytics');
-      const data = await res.json();
-      if (data.analytics) {
-        setAnalytics({
-          totalPosts: data.analytics.totalPosts || 0,
-          todayPosts: data.analytics.todayPosts || 0,
-          thisWeekPosts: data.analytics.thisWeekPosts || 0,
-        });
-      }
-    } catch (err) {
-      console.error('Error fetching analytics:', err);
-    }
-  };
+  const toggleExpand = (id: string) =>
+    setExpandedPosts((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
 
+  // ── How many pending posts are still counting down ─────────────────────────
+  const activePendingCount = pendingPosts.size;
+  const lowestTimer = activePendingCount > 0
+    ? Math.min(...Array.from(pendingPosts.values()).map((p) => p.timer))
+    : 0;
+
+  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 font-sans">
-      {/* Animated Background */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob"></div>
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-yellow-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob animation-delay-2000"></div>
-        <div className="absolute top-1/2 left-1/2 w-80 h-80 bg-pink-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob animation-delay-4000"></div>
+    <div className="min-h-screen bg-[#0a0a0f] text-white font-sans" style={{ fontFamily: "'DM Sans', 'Outfit', system-ui, sans-serif" }}>
+
+      {/* ── Background ── */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-0 left-1/4 w-[600px] h-[600px] rounded-full opacity-10"
+          style={{ background: "radial-gradient(circle, #6366f1 0%, transparent 70%)" }} />
+        <div className="absolute bottom-0 right-1/4 w-[500px] h-[500px] rounded-full opacity-8"
+          style={{ background: "radial-gradient(circle, #ec4899 0%, transparent 70%)" }} />
+        <div className="absolute inset-0 opacity-[0.02]"
+          style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='1'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E\")" }} />
       </div>
 
-      {/* Delete Confirmation Modal */}
+      {/* ── Delete Modal ── */}
       {showDeleteConfirm && (
-        <div className="fixed inset-0 backdrop-blur-md bg-black/50 flex items-center justify-center z-50 animate-fadeIn">
-          <div className="bg-gradient-to-br from-gray-900 to-gray-800 p-8 rounded-2xl shadow-2xl max-w-md w-full mx-4 border border-gray-700 transform animate-scaleIn">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-red-500/20 rounded-full">
-                <Trash2 className="w-6 h-6 text-red-500" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-[#13131a] border border-white/10 rounded-2xl p-8 w-full max-w-sm mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2 rounded-xl bg-red-500/15">
+                <Trash2 className="w-5 h-5 text-red-400" />
               </div>
-              <h3 className="text-xl font-bold text-white">Delete Post</h3>
+              <h3 className="text-lg font-semibold">Delete Post</h3>
             </div>
-            <p className="text-gray-300 mb-6">Are you sure you want to delete this post? This action cannot be undone.</p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={handleCancelDelete}
-                className="px-4 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-white transition-all"
-              >
+            <p className="text-sm text-gray-400 mb-6">Are you sure you want to delete this post? This action cannot be undone.</p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => { setShowDeleteConfirm(false); setPostToDelete(null); }}
+                className="px-4 py-2 text-sm rounded-lg bg-white/8 hover:bg-white/12 transition-colors">
                 Cancel
               </button>
-              <button
-                onClick={() => postToDelete && deletePost(postToDelete)}
-                className="px-4 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-all transform hover:scale-105"
-              >
+              <button onClick={() => postToDelete && deletePost(postToDelete)}
+                className="px-4 py-2 text-sm rounded-lg bg-red-500 hover:bg-red-600 transition-colors font-medium">
                 Delete
               </button>
             </div>
@@ -591,467 +473,343 @@ export default function Home() {
         </div>
       )}
 
-      {/* Header */}
-      <header className="relative z-10 bg-black/30 backdrop-blur-xl border-b border-white/10">
-        <div className="container mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="relative w-12 h-12">
-                <Image src={logo} alt="Logo" fill className="object-contain filter brightness-0 invert" />
-              </div>
-              <div className="h-8 w-px bg-white/20"></div>
-              <div>
-                <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-                  Daily Drafits AI
-                </h1>
-                <p className="text-xs text-gray-400">AI-Powered Content Generation</p>
-              </div>
+      {/* ── Header ── */}
+      <header className="relative z-10 border-b border-white/5 bg-black/20 backdrop-blur-xl sticky top-0">
+        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="relative w-9 h-9">
+              <Image src={logo} alt="Logo" fill className="object-contain brightness-0 invert" />
             </div>
-            
-            <button
-              onClick={() => setShowStats(!showStats)}
-              className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all flex items-center gap-2"
-            >
-              <TrendingUp className="w-4 h-4" />
+            <div>
+              <span className="text-lg font-bold tracking-tight bg-gradient-to-r from-indigo-400 to-pink-400 bg-clip-text text-transparent">
+                Daily Drafts AI
+              </span>
+              <div className="text-[10px] text-gray-500 tracking-widest uppercase">Content Generator</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {isAutoGenerating && (
+              <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Auto-generating
+              </div>
+            )}
+            <button onClick={() => setShowStats(!showStats)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${showStats ? "bg-indigo-500/20 text-indigo-400 border border-indigo-500/30" : "bg-white/5 hover:bg-white/10 text-gray-400 border border-white/8"}`}>
+              <BarChart3 className="w-4 h-4" />
               <span className="hidden sm:inline">Analytics</span>
             </button>
           </div>
         </div>
       </header>
 
-      {/* Stats Panel */}
+      {/* ── Stats Panel ── */}
       {showStats && (
-        <div className="relative z-10 container mx-auto px-6 mt-4 animate-slideDown">
-          <div className="bg-gradient-to-br from-gray-900/90 to-gray-800/90 backdrop-blur-xl rounded-2xl p-6 border border-gray-700">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="text-center">
-                <div className="text-3xl font-bold text-blue-400">{stats.total}</div>
-                <div className="text-gray-400 mt-1">Total Posts</div>
+        <div className="relative z-10 max-w-7xl mx-auto px-6 pt-4">
+          <div className="grid grid-cols-3 gap-4 bg-[#13131a] border border-white/8 rounded-2xl p-6">
+            {[
+              { label: "Total Posts", value: analytics.totalPosts, color: "text-indigo-400" },
+              { label: "Today", value: analytics.todayPosts, color: "text-emerald-400" },
+              { label: "This Week", value: analytics.thisWeekPosts, color: "text-pink-400" },
+            ].map((s) => (
+              <div key={s.label} className="text-center">
+                <div className={`text-4xl font-bold ${s.color}`}>{s.value}</div>
+                <div className="text-xs text-gray-500 mt-1 uppercase tracking-wider">{s.label}</div>
               </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-green-400">{stats.today}</div>
-                <div className="text-gray-400 mt-1">Created Today</div>
-              </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-purple-400">{stats.thisWeek}</div>
-                <div className="text-gray-400 mt-1">This Week</div>
-              </div>
-            </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* Hero Section */}
-      <div className="relative z-10 container mx-auto px-6 py-12">
-        <div className="max-w-4xl mx-auto text-center">
-          <div className="inline-flex items-center gap-2 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded-full px-4 py-2 mb-6 backdrop-blur-sm">
-            <Sparkles className="w-4 h-4 text-yellow-400" />
-            <span className="text-sm text-gray-300">AI-Powered Content Generation</span>
-          </div>
-          
-          <h2 className="text-5xl md:text-6xl font-bold bg-gradient-to-r from-white via-blue-300 to-purple-300 bg-clip-text text-transparent mb-6">
-            Create Amazing Content
-          </h2>
-          
-          <p className="text-xl text-gray-300 mb-8">
-            Generate unique, engaging articles with our advanced AI technology
-          </p>
-
-          {/* Cooldown Timer */}
-          {cooldown > 0 && (
-            <div className="inline-flex items-center gap-3 bg-black/50 backdrop-blur-sm rounded-full px-6 py-3 mb-8">
-              <Clock className="w-5 h-5 text-yellow-400 animate-pulse" />
-              <span className="text-white font-mono text-xl">{formatCooldown(cooldown)}</span>
-              <span className="text-gray-400">cooldown</span>
-            </div>
-          )}
-
-          {/* Post Display Timer with Stop Button */}
-          {postDisplayTimer > 0 && (
-            <div className="flex items-center justify-center gap-4 mb-6">
-              <div className="inline-flex items-center gap-3 bg-yellow-500/20 backdrop-blur-sm rounded-full px-6 py-3">
-                <Clock className="w-5 h-5 text-yellow-400 animate-pulse" />
-                <span className="text-white font-mono text-xl">{formatCooldown(postDisplayTimer)}</span>
-                <span className="text-yellow-400">remaining for next post</span>
-              </div>
-              <button
-                onClick={handleStop}
-                className="flex items-center gap-2 px-4 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-full transition-all border border-red-500/30"
-              >
-                <Square className="w-4 h-4" />
-                Stop
-              </button>
-            </div>
-          )}
-
-          {/* Input Section */}
-          <div className="bg-black/30 backdrop-blur-xl rounded-2xl p-1 border border-white/20 mb-6">
-            <div className="flex flex-col md:flex-row gap-2">
-              <div className="flex-1 relative">
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={currentTopic}
-                  onChange={(e) => setCurrentTopic(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && handleGenerate()}
-                  placeholder="Enter a topic... (e.g., 'Future of Artificial Intelligence')"
-                  disabled={postDisplayTimer > 0 || isLoading}
-                  className="w-full px-6 py-4 bg-transparent text-white placeholder-gray-400 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-                />
-              </div>
-              <button
-                onClick={handleGenerate}
-                disabled={!currentTopic || isLoading || cooldown > 0 || postDisplayTimer > 0}
-                className="px-8 py-4 rounded-xl bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold transition-all transform hover:scale-105 disabled:opacity-50 disabled:hover:scale-100 flex items-center justify-center gap-2"
-              >
-                {isLoading ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    Generating...
-                  </>
-                ) : postDisplayTimer > 0 ? (
-                  <>
-                    <Clock className="w-5 h-5" />
-                    Wait {formatCooldown(postDisplayTimer)}
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-5 h-5" />
-                    Generate
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {error && (
-            <div className="flex items-center justify-center gap-2 text-red-400 bg-red-400/10 rounded-lg px-4 py-2 mb-6">
-              <AlertCircle className="w-4 h-4" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          {stopMessage && (
-            <div className="flex items-center justify-center gap-2 text-yellow-400 bg-yellow-400/10 rounded-lg px-4 py-2 mb-6">
-              <AlertCircle className="w-4 h-4" />
-              <span>{stopMessage}</span>
-            </div>
-          )}
-
-          {/* Popular Topics */}
-          <div className="flex flex-wrap justify-center gap-2 mt-6">
-            <span className="text-gray-400 text-sm">Popular:</span>
-            {popularTopics.map((topic) => (
-              <button
-                key={topic}
-                onClick={() => {
-                  setCurrentTopic(topic);
-                  if (inputRef.current) inputRef.current.value = topic;
-                }}
-                className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/20 text-gray-300 text-sm transition-all"
-              >
-                {topic}
-              </button>
-            ))}
-          </div>
+      {/* ── Hero / Input ── */}
+      <div className="relative z-10 max-w-4xl mx-auto px-6 pt-16 pb-8 text-center">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-medium mb-8">
+          <Sparkles className="w-3.5 h-3.5" />
+          AI-Powered Content Generation
         </div>
 
-        {/* Filters */}
-        <div className="mt-12 flex flex-col md:flex-row gap-4 justify-between items-center">
-          <div className="flex flex-wrap gap-2">
-            {categories.map((category) => {
-              const Icon = category.icon;
-              return (
-                <button
-                  key={category.id}
-                  onClick={() => {
-                    setSelectedCategory(category.id);
-                    setCurrentPage(1);
-                  }}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
-                    selectedCategory === category.id
-                      ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white shadow-lg'
-                      : 'bg-white/10 text-gray-300 hover:bg-white/20'
-                  }`}
-                >
-                  <Icon className="w-4 h-4" />
-                  <span>{category.name}</span>
-                </button>
-              );
-            })}
-          </div>
-          
-          <div className="relative">
-            <input
-              type="text"
-              placeholder="Search posts..."
-              value={searchTerm}
-              onChange={(e) => {
-                setSearchTerm(e.target.value);
-                setCurrentPage(1);
-              }}
-              className="px-4 py-2 pl-10 rounded-lg bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
-            />
-            <div className="absolute left-3 top-1/2 transform -translate-y-1/2">
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-            </div>
-          </div>
-        </div>
-      </div>
+        <h1 className="text-5xl md:text-6xl font-extrabold tracking-tight mb-5 leading-[1.05]">
+          <span className="text-white">Create </span>
+          <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+            Brilliant
+          </span>
+          <br />
+          <span className="text-white">Content Instantly</span>
+        </h1>
 
-      {/* Posts Grid */}
-      <main className="relative z-10 container mx-auto px-6 py-12">
-        {isLoading && (
-          <div className="flex flex-col items-center justify-center py-20">
-            <div className="relative">
-              <div className="w-20 h-20 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin"></div>
-              <div className="absolute inset-0 flex items-center justify-center">
-                <Sparkles className="w-8 h-8 text-yellow-400 animate-pulse" />
-              </div>
+        <p className="text-gray-400 text-lg mb-10 max-w-xl mx-auto">
+          Enter any topic and let our AI craft unique, engaging articles — automatically, on repeat.
+        </p>
+
+        {/* Cooldown badge */}
+        {cooldown > 0 && (
+          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm mb-6">
+            <Clock className="w-4 h-4" />
+            Cooldown: <span className="font-mono font-bold">{formatTime(cooldown)}</span>
+          </div>
+        )}
+
+        {/* Pending save status bar */}
+        {activePendingCount > 0 && (
+          <div className="flex items-center justify-center gap-4 mb-6 flex-wrap">
+            <div className="inline-flex items-center gap-3 px-5 py-2.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-sm">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>
+                {activePendingCount} post{activePendingCount > 1 ? "s" : ""} saving in{" "}
+                <span className="font-mono font-bold">{formatTime(lowestTimer)}</span>
+              </span>
             </div>
-            <p className="mt-6 text-gray-300">Crafting your content...</p>
-            <button
-              onClick={handleStop}
-              className="mt-4 flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg transition-all"
-            >
-              <Square className="w-4 h-4" />
-              Stop Generation
+            <button onClick={handleStop}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 text-sm transition-all">
+              <Square className="w-3.5 h-3.5" />
+              Stop
             </button>
           </div>
         )}
 
-        {!isLoading && currentPosts.length > 0 ? (
+        {/* Input bar */}
+        <div className="relative flex flex-col sm:flex-row gap-2 bg-[#13131a] border border-white/10 rounded-2xl p-2 mb-4 focus-within:border-indigo-500/50 transition-colors shadow-xl shadow-black/40">
+          <input
+            ref={inputRef}
+            type="text"
+            value={currentTopic}
+            onChange={(e) => setCurrentTopic(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !isLoading && !cooldown && handleGenerate()}
+            placeholder="e.g. Future of Artificial Intelligence"
+            disabled={isLoading || activePendingCount > 0}
+            className="flex-1 px-5 py-3.5 bg-transparent text-white placeholder-gray-500 focus:outline-none disabled:opacity-40 disabled:cursor-not-allowed text-base"
+          />
+          <button
+            onClick={handleGenerate}
+            disabled={!currentTopic.trim() || isLoading || cooldown > 0 || activePendingCount > 0}
+            className="flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 font-semibold text-sm transition-all disabled:opacity-40 disabled:hover:from-indigo-500 disabled:cursor-not-allowed whitespace-nowrap shadow-lg shadow-indigo-500/20"
+          >
+            {isLoading ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</>
+            ) : activePendingCount > 0 ? (
+              <><Clock className="w-4 h-4" /> Saving…</>
+            ) : (
+              <><Send className="w-4 h-4" /> Generate</>
+            )}
+          </button>
+        </div>
+
+        {/* Errors / messages */}
+        {error && (
+          <div className="flex items-center justify-center gap-2 text-red-400 bg-red-400/8 border border-red-400/20 rounded-xl px-4 py-2.5 mb-4 text-sm">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            {error}
+          </div>
+        )}
+        {stopMessage && (
+          <div className="flex items-center justify-center gap-2 text-amber-400 bg-amber-400/8 border border-amber-400/20 rounded-xl px-4 py-2.5 mb-4 text-sm">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            {stopMessage}
+          </div>
+        )}
+
+        {/* Popular topics */}
+        <div className="flex flex-wrap justify-center gap-2 mt-4">
+          <span className="text-gray-600 text-xs self-center">Try:</span>
+          {popularTopics.map((t) => (
+            <button key={t}
+              onClick={() => { setCurrentTopic(t); if (inputRef.current) inputRef.current.value = t; }}
+              className="px-3 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/8 text-gray-400 hover:text-white text-xs transition-all">
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Filters ── */}
+      <div className="relative z-10 max-w-7xl mx-auto px-6 pb-6">
+        <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
+          <div className="flex flex-wrap gap-2">
+            {categories.map(({ id, name, icon: Icon }) => (
+              <button key={id}
+                onClick={() => { setSelectedCategory(id); setCurrentPage(1); }}
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium transition-all ${selectedCategory === id
+                  ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
+                  : "bg-white/5 text-gray-400 hover:bg-white/10 border border-white/8"}`}>
+                <Icon className="w-3.5 h-3.5" />
+                {name}
+              </button>
+            ))}
+          </div>
+
+          <div className="relative">
+            <input type="text" placeholder="Search posts…" value={searchTerm}
+              onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+              className="w-56 pl-9 pr-4 py-2 rounded-xl bg-white/5 border border-white/8 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500/50 transition-colors" />
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Posts Grid ── */}
+      <main className="relative z-10 max-w-7xl mx-auto px-6 pb-20">
+        {isLoading && pendingPosts.size === 0 && (
+          <div className="flex flex-col items-center justify-center py-24 gap-5">
+            <div className="relative">
+              <div className="w-16 h-16 rounded-full border-2 border-indigo-500/20 border-t-indigo-500 animate-spin" />
+              <Sparkles className="absolute inset-0 m-auto w-6 h-6 text-indigo-400" />
+            </div>
+            <p className="text-gray-400 text-sm">Crafting your content…</p>
+            <button onClick={handleStop}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 text-sm transition-all">
+              <Square className="w-3.5 h-3.5" /> Stop
+            </button>
+          </div>
+        )}
+
+        {!isLoading && currentPosts.length === 0 && pendingPosts.size === 0 && (
+          <div className="flex flex-col items-center justify-center py-24 gap-4">
+            <div className="w-16 h-16 rounded-2xl bg-white/5 border border-white/8 flex items-center justify-center">
+              <FileText className="w-8 h-8 text-gray-500" />
+            </div>
+            <h3 className="text-xl font-semibold text-white">No posts yet</h3>
+            <p className="text-sm text-gray-500 text-center max-w-xs">
+              {searchTerm || selectedCategory !== "all"
+                ? "Try adjusting your filters or search"
+                : "Enter a topic above to generate your first article"}
+            </p>
+          </div>
+        )}
+
+        {currentPosts.length > 0 && (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {currentPosts.map((post, index) => {
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {currentPosts.map((post, idx) => {
                 const isPending = pendingPosts.has(post.id);
-                const pendingData = pendingPosts.get(post.id);
+                const pendingTimer = pendingPosts.get(post.id)?.timer ?? 0;
                 const isExpanded = expandedPosts.has(post.id);
-                
+                const isLong = post.description.length > 150;
+
                 return (
-                  <div
+                  <article
                     key={post.id}
-                    className="group relative bg-gradient-to-br from-gray-900/90 to-gray-800/90 backdrop-blur-xl rounded-2xl overflow-hidden hover:shadow-2xl transition-all duration-300 transform hover:-translate-y-2 animate-fadeInUp flex flex-col"
-                    style={{ animationDelay: `${index * 100}ms` }}
+                    className="group relative flex flex-col bg-[#13131a] border border-white/8 rounded-2xl overflow-hidden hover:border-white/15 transition-all duration-300 hover:shadow-xl hover:shadow-black/40"
+                    style={{ animationDelay: `${idx * 60}ms` }}
                   >
-                    {/* Gradient Border */}
-                    <div className="absolute inset-0 bg-gradient-to-r from-blue-500 to-purple-600 opacity-0 group-hover:opacity-100 transition-opacity duration-300 rounded-2xl -z-10"></div>
-                    <div className="absolute inset-[1px] bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl"></div>
-                    
-                    
-                    <div className="relative p-6 flex flex-col h-full">
-                      <div className="flex justify-between items-start mb-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-3 flex-wrap">
-                            <Calendar className="w-3 h-3 text-gray-400" />
-                            <span className="text-xs text-gray-400">
-                              {new Date(post.createdAt ?? '').toLocaleDateString()}
-                            </span>
-                            {post.topic && (
-                              <>
-                                <Hash className="w-3 h-3 text-gray-400" />
-                                <span className="text-xs text-gray-400 truncate max-w-[100px]">{post.topic}</span>
-                              </>
-                            )}
-                          </div>
-                          {/* Full title without truncation */}
-                          <h3 className="text-lg font-bold text-white mb-3 group-hover:text-blue-300 transition-colors leading-tight">
-                            {post.title}
-                          </h3>
-                        </div>
-                        <button
-                          onClick={() => handleDeleteClick(post.id)}
-                          className="opacity-0 group-hover:opacity-100 p-2 rounded-lg bg-red-500/20 hover:bg-red-500/40 text-red-400 transition-all flex-shrink-0 ml-2"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                    {/* Pending save indicator */}
+                    {isPending && (
+                      <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-indigo-500 to-purple-500">
+                        <div className="h-full bg-white/30 animate-pulse" />
                       </div>
-                      
-                      {/* Scrollable content area */}
-                      <div className="flex-1 overflow-hidden relative min-h-[120px]">
-                        <div 
-                          className={`text-gray-300 leading-relaxed transition-all duration-300 ${
-                            isExpanded ? 'overflow-y-auto max-h-[200px] pr-2 scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-transparent' : 'line-clamp-4'
-                          }`}
-                        >
-                          {post.description}
+                    )}
+
+                    <div className="flex flex-col flex-1 p-5">
+                      {/* Meta row */}
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                            <Calendar className="w-3 h-3 flex-shrink-0" />
+                            {new Date(post.createdAt ?? "").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                          </div>
+                          {post.topic && (
+                            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 text-xs font-medium max-w-[120px]">
+                              <Hash className="w-2.5 h-2.5 flex-shrink-0" />
+                              <span className="truncate">{post.topic}</span>
+                            </div>
+                          )}
                         </div>
-                        
-                        {/* Gradient overlay when not expanded */}
-                        {!isExpanded && post.description.length > 200 && (
-                          <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-gray-900 to-transparent pointer-events-none"></div>
+
+                        {/* Pending timer OR delete button */}
+                        {isPending ? (
+                          <div className="flex items-center gap-1 text-xs text-amber-400 bg-amber-500/10 px-2 py-1 rounded-lg flex-shrink-0">
+                            <Clock className="w-3 h-3" />
+                            <span className="font-mono">{formatTime(pendingTimer)}</span>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => { setPostToDelete(post.id); setShowDeleteConfirm(true); }}
+                            className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-all flex-shrink-0">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         )}
                       </div>
-                      
-                      {/* Read More / Read Less Button */}
-                      {post.description.length > 150 && (
-                        <div className="mt-auto pt-3 border-t border-white/10">
-                          <button 
-                            onClick={() => toggleExpandPost(post.id)}
-                            className="text-sm text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1"
-                          >
-                            {isExpanded ? (
-                              <>
-                                Read less
-                                <ChevronUp className="w-3 h-3" />
-                              </>
-                            ) : (
-                              <>
-                                Read more
-                                <ChevronRight className="w-3 h-3" />
-                              </>
-                            )}
-                          </button>
-                        </div>
+
+                      {/* Title */}
+                      <h2 className="text-base font-semibold text-white mb-3 leading-snug group-hover:text-indigo-200 transition-colors">
+                        {post.title}
+                      </h2>
+
+                      {/* Description */}
+                      <div className="flex-1 relative">
+                        <p className={`text-sm text-gray-400 leading-relaxed transition-all ${isExpanded ? "overflow-y-auto max-h-48 pr-1" : "line-clamp-4"}`}>
+                          {post.description}
+                        </p>
+                        {!isExpanded && isLong && (
+                          <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-[#13131a] to-transparent pointer-events-none" />
+                        )}
+                      </div>
+
+                      {/* Read more */}
+                      {isLong && (
+                        <button onClick={() => toggleExpand(post.id)}
+                          className="mt-3 flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 transition-colors pt-3 border-t border-white/5">
+                          {isExpanded
+                            ? <><ChevronUp className="w-3 h-3" /> Show less</>
+                            : <><ChevronRight className="w-3 h-3" /> Read more</>}
+                        </button>
                       )}
                     </div>
-                  </div>
+                  </article>
                 );
               })}
             </div>
 
             {/* Pagination */}
             {totalPages > 1 && (
-              <div className="flex justify-center items-center gap-3 mt-12">
-     
-               <button
-                  onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+              <div className="flex justify-center items-center gap-2 mt-10">
+                <button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                   disabled={currentPage === 1}
-                  className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                >
-                  <ChevronLeft className="w-5 h-5" />
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all border border-white/8">
+                  <ChevronLeft className="w-4 h-4" />
                 </button>
-                
-                <div className="flex gap-2">
-                  {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                    let pageNum;
-                    if (totalPages <= 5) {
-                      pageNum = i + 1;
-                    } else if (currentPage <= 3) {
-                      pageNum = i + 1;
-                    } else if (currentPage >= totalPages - 2) {
-                      pageNum = totalPages - 4 + i;
-                    } else {
-                      pageNum = currentPage - 2 + i;
-                    }
-                    
-                    return (
-                      <button
-                        key={pageNum}
-                        onClick={() => setCurrentPage(pageNum)}
-                        className={`w-10 h-10 rounded-lg transition-all ${
-                          currentPage === pageNum
-                            ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white'
-                            : 'bg-white/10 text-gray-300 hover:bg-white/20'
-                        }`}
-                      >
-                        {pageNum}
-                      </button>
-                    );
-                  })}
-                </div>
-                
-                <button
-                  onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+
+                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                  let pg = i + 1;
+                  if (totalPages > 5) {
+                    if (currentPage <= 3) pg = i + 1;
+                    else if (currentPage >= totalPages - 2) pg = totalPages - 4 + i;
+                    else pg = currentPage - 2 + i;
+                  }
+                  return (
+                    <button key={pg} onClick={() => setCurrentPage(pg)}
+                      className={`w-9 h-9 rounded-xl text-sm font-medium transition-all ${currentPage === pg
+                        ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
+                        : "bg-white/5 text-gray-400 hover:bg-white/10 border border-white/8"}`}>
+                      {pg}
+                    </button>
+                  );
+                })}
+
+                <button onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                   disabled={currentPage === totalPages}
-                  className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                >
-                  <ChevronRight className="w-5 h-5" />
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all border border-white/8">
+                  <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
             )}
           </>
-        ) : (
-          !isLoading && (
-            <div className="text-center py-20">
-              <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-white/10 mb-6">
-                <BookOpen className="w-10 h-10 text-gray-400" />
-              </div>
-              <h3 className="text-2xl font-bold text-white mb-2">No posts found</h3>
-              <p className="text-gray-400">
-                {searchTerm || selectedCategory !== "all"
-                  ? "Try adjusting your filters or search term"
-                  : "Enter a topic above to generate your first post"}
-              </p>
-            </div>
-          )
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="relative z-10 bg-black/30 backdrop-blur-xl border-t border-white/10 mt-20">
-        <div className="container mx-auto px-6 py-8">
-          <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-            <div className="flex items-center gap-2">
-              <span className="text-gray-400">© 2026 Daily Drafits AI. All rights reserved.</span>
-            </div>
-            <div className="flex gap-6">
-              <a href="#" className="text-gray-400 hover:text-white transition-colors">About</a>
-              <a href="#" className="text-gray-400 hover:text-white transition-colors">Privacy</a>
-              <a href="#" className="text-gray-400 hover:text-white transition-colors">Terms</a>
-            </div>
+      {/* ── Footer ── */}
+      <footer className="relative z-10 border-t border-white/5 bg-black/20">
+        <div className="max-w-7xl mx-auto px-6 py-6 flex flex-col sm:flex-row justify-between items-center gap-3">
+          <span className="text-xs text-gray-600">© 2026 Daily Drafts AI. All rights reserved.</span>
+          <div className="flex gap-5 text-xs text-gray-600">
+            {["About", "Privacy", "Terms"].map((l) => (
+              <a key={l} href="#" className="hover:text-gray-300 transition-colors">{l}</a>
+            ))}
           </div>
         </div>
       </footer>
-
-      <style jsx>{`
-        @keyframes blob {
-          0% { transform: translate(0px, 0px) scale(1); }
-          33% { transform: translate(30px, -50px) scale(1.1); }
-          66% { transform: translate(-20px, 20px) scale(0.9); }
-          100% { transform: translate(0px, 0px) scale(1); }
-        }
-        @keyframes fadeInUp {
-          from {
-            opacity: 0;
-            transform: translateY(20px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-        @keyframes slideDown {
-          from {
-            opacity: 0;
-            transform: translateY(-20px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-        @keyframes scaleIn {
-          from {
-            opacity: 0;
-            transform: scale(0.9);
-          }
-          to {
-            opacity: 1;
-            transform: scale(1);
-          }
-        }
-        .animate-blob {
-          animation: blob 7s infinite;
-        }
-        .animate-fadeInUp {
-          animation: fadeInUp 0.6s ease-out forwards;
-        }
-        .animate-slideDown {
-          animation: slideDown 0.5s ease-out;
-        }
-        .animate-scaleIn {
-          animation: scaleIn 0.3s ease-out;
-        }
-        .animation-delay-2000 {
-          animation-delay: 2s;
-        }
-        .animation-delay-4000 {
-          animation-delay: 4s;
-        }
-      `}</style>
     </div>
   );
 }
